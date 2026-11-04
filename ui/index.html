@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>daylog</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!-- Unlock gate: shown only when an encrypted store is locked -->
+    <div id="lock-overlay" class="overlay hidden">
+      <div class="lock-card">
+        <div class="lock-icon">🔒</div>
+        <h2>Log is encrypted</h2>
+        <p>Enter your password to unlock this session.</p>
+        <input id="unlock-pw" type="password" placeholder="Password" autocomplete="off" />
+        <button id="unlock-btn" class="primary">Unlock</button>
+        <div id="unlock-err" class="err"></div>
+      </div>
+    </div>
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">◷</span>
+        <span class="brand-name">daylog</span>
+        <span class="tag">activity logger</span>
+      </div>
+      <div class="status-pills">
+        <span id="pill-state" class="pill">—</span>
+        <span id="pill-enc" class="pill pill-muted">plaintext</span>
+        <span id="pill-current" class="pill pill-current" title="currently focused">idle</span>
+      </div>
+      <button id="toggle-pause" class="pause-btn">Pause</button>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="dashboard">Dashboard</button>
+      <button class="tab" data-tab="log">Log</button>
+      <button class="tab" data-tab="settings">Settings</button>
+    </nav>
+
+    <main>
+      <!-- DASHBOARD -->
+      <section id="tab-dashboard" class="tab-panel active">
+        <div class="range-row">
+          <label>Range</label>
+          <select id="range-select">
+            <option value="today">Today</option>
+            <option value="7d" selected>Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+            <option value="all">All time</option>
+          </select>
+          <button id="refresh-dash" class="ghost">Refresh</button>
+        </div>
+
+        <div class="cards">
+          <div class="card stat">
+            <div class="stat-label">Tracked time</div>
+            <div id="stat-total" class="stat-value">—</div>
+          </div>
+          <div class="card stat">
+            <div class="stat-label">Sessions</div>
+            <div id="stat-events" class="stat-value">—</div>
+          </div>
+          <div class="card stat">
+            <div class="stat-label">Top app</div>
+            <div id="stat-top" class="stat-value">—</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Time per app</h3>
+          <div id="app-bars" class="bars"><div class="empty">No data yet.</div></div>
+        </div>
+
+        <div class="card">
+          <h3>By day</h3>
+          <div id="day-bars" class="daybars"><div class="empty">No data yet.</div></div>
+        </div>
+      </section>
+
+      <!-- LOG -->
+      <section id="tab-log" class="tab-panel">
+        <div class="filters">
+          <input id="f-keyword" type="text" placeholder="Search app or title…" />
+          <input id="f-app" type="text" placeholder="App filter" />
+          <input id="f-from" type="date" />
+          <input id="f-to" type="date" />
+          <select id="f-limit">
+            <option value="200">200 rows</option>
+            <option value="500">500 rows</option>
+            <option value="1000">1000 rows</option>
+            <option value="0">All</option>
+          </select>
+          <button id="apply-filter" class="primary">Apply</button>
+          <span class="spacer"></span>
+          <button id="export-csv" class="ghost">Export CSV</button>
+          <button id="export-md" class="ghost">Export MD</button>
+          <button id="clear-logs" class="danger">Clear…</button>
+        </div>
+        <div id="export-note" class="note hidden"></div>
+        <div class="table-wrap">
+          <table id="log-table">
+            <thead>
+              <tr><th>Start</th><th>Duration</th><th>App</th><th>Window title</th></tr>
+            </thead>
+            <tbody id="log-body"></tbody>
+          </table>
+          <div id="log-empty" class="empty">No entries match.</div>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section id="tab-settings" class="tab-panel">
+        <div class="warn-banner">
+          ⚠️ The log records <b>window titles</b> (e.g. document or page names), which can
+          be sensitive. With encryption <b>off</b>, the log file is plain text and readable by
+          anything that can read it. daylog never records keystrokes or typed text.
+          Global activity tools can occasionally be flagged by antivirus — this one uses
+          <b>no keyboard hook</b>, but an unsigned build may still prompt Gatekeeper/SmartScreen.
+        </div>
+
+        <div class="card">
+          <h3>Storage</h3>
+          <label class="field">
+            <span>Log file path</span>
+            <div class="row">
+              <input id="s-path" type="text" />
+              <button id="open-folder" class="ghost">Open folder</button>
+            </div>
+          </label>
+          <label class="field">
+            <span>Auto-purge entries older than (days, blank = keep forever)</span>
+            <input id="s-purge" type="number" min="1" placeholder="—" />
+          </label>
+        </div>
+
+        <div class="card">
+          <h3>Encryption <span class="sub">AES-256-GCM · Argon2id key · password never stored</span></h3>
+          <label class="switch-row">
+            <input id="s-enc" type="checkbox" />
+            <span>Encrypt the log at rest</span>
+          </label>
+          <label class="field" id="enc-pw-field">
+            <span>Password (required to enable; needed each session to read)</span>
+            <input id="s-enc-pw" type="password" autocomplete="off" placeholder="••••••••" />
+          </label>
+        </div>
+
+        <div class="card">
+          <h3>Sensitive-app exclusion</h3>
+          <label class="switch-row">
+            <input id="s-excl" type="checkbox" />
+            <span>Pause logging when a blocked app/title is focused</span>
+          </label>
+          <label class="field">
+            <span>Blocklist — one substring per line (matched in app name or title)</span>
+            <textarea id="s-blocklist" rows="4" placeholder="1Password&#10;Banking&#10;chase.com"></textarea>
+          </label>
+        </div>
+
+        <div class="card">
+          <h3>Behavior</h3>
+          <label class="switch-row">
+            <input id="s-autostart" type="checkbox" />
+            <span>Start daylog on login</span>
+          </label>
+          <label class="switch-row">
+            <input id="s-show" type="checkbox" />
+            <span>Show window on launch (otherwise tray-only)</span>
+          </label>
+          <label class="field">
+            <span>Sampling interval (ms)</span>
+            <input id="s-poll" type="number" min="250" step="250" />
+          </label>
+        </div>
+
+        <div class="settings-actions">
+          <button id="save-settings" class="primary">Save settings</button>
+          <span id="save-note" class="note"></span>
+        </div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

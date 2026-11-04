@@ -1,0 +1,36 @@
+# Rust build output
+target/
+src-tauri/target/
+
+# Tauri generated files (regenerated on build)
+src-tauri/gen/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local build artifacts and logs
+*.log
+dist/
+*.dmg
+*.msi
+*.AppImage
+*.deb
+*.rpm
+
+# Local environment files
+.env
+.env.*
+
+# NOTE: src-tauri/icons/ is intentionally tracked. Do not ignore it.
+
+# Claude Code session artifacts
+.claude/

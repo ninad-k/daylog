@@ -75,6 +75,14 @@ impl Core {
         self.config.encryption_enabled && self.store.is_none()
     }
 
+    /// Drop the active store so nothing is written until it is (re)opened.
+    /// Used to avoid a fail-open state where a plaintext store survives after
+    /// encryption was requested but could not be initialised.
+    pub fn store_lock(&mut self) {
+        self.current = None;
+        self.store = None;
+    }
+
     fn is_excluded(&self, f: &Focus) -> bool {
         if !self.config.exclusion_enabled {
             return false;

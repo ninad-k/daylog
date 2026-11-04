@@ -47,20 +47,21 @@ pub fn set_config(app: AppHandle, core: State<'_, SharedCore>, config: Config) -
     }
 
     let path_changed = config.log_path != old.log_path;
-    let enc_changed = config.encryption_enabled != old.encryption_enabled;
     c.config = config;
+    // Encryption is toggled ONLY through `set_encryption` (which verifies the
+    // password and opens the store before persisting the flag). Ignore any
+    // change the caller tried to make here so this path can never leave the
+    // config claiming "encrypted" while a plaintext store stays live.
+    c.config.encryption_enabled = old.encryption_enabled;
     c.config.save().map_err(|e| e.to_string())?;
 
-    // Reopen the store if where/how we write changed.
-    if enc_changed || path_changed {
+    // Reopen the store when the destination path changed.
+    if path_changed {
         c.flush_current();
         if c.config.encryption_enabled {
-            // Turning encryption on needs a password via `set_encryption`/`unlock`;
-            // until then the store is locked.
-            // (Leaving store as-is here would write plaintext to the wrong file.)
-            if enc_changed {
-                // Caller should follow up with set_encryption(true, password).
-            }
+            // New encrypted path needs the password again — lock until `unlock`,
+            // rather than writing to the new file with a key we haven't re-derived.
+            c.store_lock();
         } else {
             c.open_store(None).map_err(|e| e.to_string())?;
         }
@@ -117,17 +118,31 @@ pub fn set_encryption(
 ) -> R<Status> {
     let mut c = lock(&core);
     c.flush_current();
+    let prev = c.config.encryption_enabled;
+
+    // Fail-safe: open (and for encryption, verify the password against) the new
+    // store BEFORE persisting the flag. If anything fails we revert the flag and
+    // drop the store, so we never keep writing plaintext while the config claims
+    // the log is encrypted. `open_store` reads `encryption_enabled` to pick the
+    // backend + path, so set it first, then roll back on error.
     c.config.encryption_enabled = enabled;
-    c.config.save().map_err(|e| e.to_string())?;
-    if enabled {
-        let pw = password.ok_or("password required to enable encryption")?;
-        if pw.is_empty() {
-            return Err("password cannot be empty".into());
+    let opened = if enabled {
+        match password {
+            Some(pw) if !pw.is_empty() => c.open_store(Some(&pw)),
+            Some(_) => Err(anyhow::anyhow!("password cannot be empty")),
+            None => Err(anyhow::anyhow!("password required to enable encryption")),
         }
-        c.open_store(Some(&pw)).map_err(|e| e.to_string())?;
     } else {
-        c.open_store(None).map_err(|e| e.to_string())?;
+        c.open_store(None)
+    };
+    if let Err(e) = opened {
+        c.config.encryption_enabled = prev;
+        c.store_lock(); // ensure no stale plaintext store survives a failed enable
+        return Err(e.to_string());
     }
+
+    // Only now is it safe to persist the new encryption state.
+    c.config.save().map_err(|e| e.to_string())?;
     Ok(c.status())
 }
 

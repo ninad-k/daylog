@@ -6,8 +6,7 @@
 
 use super::Store;
 use crate::model::Event;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 
 pub struct PlainStore {
@@ -20,46 +19,38 @@ impl PlainStore {
             std::fs::create_dir_all(parent)?;
         }
         // Touch the file so the configured path exists immediately.
-        OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(&path)?;
         Ok(PlainStore { path })
     }
 }
 
 impl Store for PlainStore {
     fn append(&mut self, e: &Event) -> anyhow::Result<()> {
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        let line = serde_json::to_string(e)?;
-        writeln!(f, "{line}")?;
-        Ok(())
+        super::append_line(&self.path, &serde_json::to_string(e)?)
     }
 
     fn all(&self) -> anyhow::Result<Vec<Event>> {
-        let f = match File::open(&self.path) {
-            Ok(f) => f,
-            Err(_) => return Ok(Vec::new()),
-        };
-        let mut out = Vec::new();
-        for line in BufReader::new(f).lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            // Skip unparseable lines rather than aborting the whole read:
-            // a half-written final line (e.g. after a crash) shouldn't make
-            // the entire history unreadable.
-            if let Ok(e) = serde_json::from_str::<Event>(&line) {
-                out.push(e);
-            }
-        }
-        Ok(out)
+        super::read_events(&self.path, false, |line| Ok(serde_json::from_str(line)?))
     }
 
     fn clear(&mut self) -> anyhow::Result<()> {
-        File::create(&self.path)?; // truncate to empty
-        Ok(())
+        self.replace(&[])
+    }
+
+    fn replace(&mut self, events: &[Event]) -> anyhow::Result<()> {
+        let mut body = Vec::new();
+        for event in events {
+            serde_json::to_writer(&mut body, event)?;
+            body.push(b'\n');
+        }
+        super::atomic_write(&self.path, &body)
     }
 
     fn path(&self) -> PathBuf {

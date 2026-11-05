@@ -19,13 +19,13 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use zeroize::Zeroizing;
 
 const MAGIC: &str = "daylog-enc";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct Header {
@@ -35,6 +35,8 @@ struct Header {
     m_cost: u32,
     t_cost: u32,
     p_cost: u32,
+    #[serde(default)]
+    verifier: Option<String>,
 }
 
 impl Header {
@@ -50,6 +52,7 @@ impl Header {
             m_cost: 19_456,
             t_cost: 2,
             p_cost: 1,
+            verifier: None,
         }
     }
 }
@@ -63,15 +66,14 @@ pub struct EncryptedStore {
 impl EncryptedStore {
     /// Open (or create) an encrypted store at `path`, unlocking with `password`.
     ///
-    /// If the file already holds records, the password is verified by trying to
-    /// decrypt the first record; a wrong password fails fast here instead of
-    /// silently returning garbage.
+    /// Authenticate the password with the header verifier. Legacy v1 logs use
+    /// their first record for verification before upgrading the header.
     pub fn open(path: PathBuf, password: &str) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        let (header, header_line, existing_record): (Header, String, Option<String>) =
+        let (mut header, header_line, existing_record): (Header, String, Option<String>) =
             match File::open(&path) {
                 Ok(f) => {
                     let mut lines = BufReader::new(f).lines();
@@ -80,6 +82,12 @@ impl EncryptedStore {
                             let hl = first?;
                             let header: Header = serde_json::from_str(&hl)
                                 .context("log header is not a valid daylog encrypted header")?;
+                            if header.version == 0 || header.version > VERSION {
+                                return Err(anyhow!("unsupported encrypted log version"));
+                            }
+                            if header.version >= 2 && header.verifier.is_none() {
+                                return Err(anyhow!("missing encrypted password verifier"));
+                            }
                             if header.magic != MAGIC {
                                 return Err(anyhow!("not a daylog encrypted log"));
                             }
@@ -102,36 +110,51 @@ impl EncryptedStore {
                         }
                     }
                 }
-                Err(_) => {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     let h = Header::fresh();
                     let hl = serde_json::to_string(&h)?;
                     (h, hl, None)
                 }
+                Err(e) => return Err(e.into()),
             };
 
         let key = derive_key(password, &header)?;
 
-        // Ensure the file exists and begins with the header line.
-        if !path.exists() || std::fs::metadata(&path)?.len() == 0 {
-            let mut f = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&path)?;
-            writeln!(f, "{header_line}")?;
-        }
-
-        let store = EncryptedStore {
+        let mut store = EncryptedStore {
             path,
             key,
             header_line,
         };
-
-        // Verify the password against any existing record.
-        if let Some(rec) = existing_record {
+        if let Some(verifier) = &header.verifier {
+            let event = store
+                .decrypt_line(verifier)
+                .context("wrong password or damaged log header")?;
+            if event.app != "daylog-password-verifier" {
+                return Err(anyhow!("invalid password verifier"));
+            }
+        } else if let Some(rec) = &existing_record {
             store
-                .decrypt_line(&rec)
-                .map_err(|_| anyhow!("wrong password"))?;
+                .decrypt_line(rec)
+                .context("wrong password or damaged first record")?;
+        }
+        // Upgrade legacy headers after successful verification. A verifier also
+        // authenticates empty/cleared logs, which have no activity records to test.
+        if header.verifier.is_none() {
+            let events = if store.path.exists() {
+                store.all()?
+            } else {
+                Vec::new()
+            };
+            let now = chrono::Utc::now();
+            header.verifier = Some(store.encrypt_event(&Event::new(
+                now,
+                now,
+                "daylog-password-verifier".into(),
+                String::new(),
+            ))?);
+            header.version = VERSION;
+            store.header_line = serde_json::to_string(&header)?;
+            store.replace(&events)?;
         }
 
         Ok(store)
@@ -170,7 +193,14 @@ impl EncryptedStore {
 }
 
 fn derive_key(password: &str, header: &Header) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+    anyhow::ensure!(
+        (8192..=262144).contains(&header.m_cost)
+            && (1..=10).contains(&header.t_cost)
+            && (1..=8).contains(&header.p_cost),
+        "unsafe or unsupported Argon2 parameters"
+    );
     let salt = B64.decode(&header.salt)?;
+    anyhow::ensure!(salt.len() == 16, "invalid salt length");
     let params = Params::new(header.m_cost, header.t_cost, header.p_cost, Some(32))
         .map_err(|e| anyhow!("bad argon2 params: {e}"))?;
     let a2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -182,42 +212,25 @@ fn derive_key(password: &str, header: &Header) -> anyhow::Result<Zeroizing<[u8; 
 
 impl Store for EncryptedStore {
     fn append(&mut self, e: &Event) -> anyhow::Result<()> {
-        let line = self.encrypt_event(e)?;
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        writeln!(f, "{line}")?;
-        Ok(())
+        super::append_line(&self.path, &self.encrypt_event(e)?)
     }
 
     fn all(&self) -> anyhow::Result<Vec<Event>> {
-        let f = match File::open(&self.path) {
-            Ok(f) => f,
-            Err(_) => return Ok(Vec::new()),
-        };
-        let mut out = Vec::new();
-        for (i, line) in BufReader::new(f).lines().enumerate() {
-            let line = line?;
-            if i == 0 || line.trim().is_empty() {
-                continue; // header / blank
-            }
-            if let Ok(e) = self.decrypt_line(&line) {
-                out.push(e);
-            }
-        }
-        Ok(out)
+        super::read_events(&self.path, true, |line| self.decrypt_line(line))
     }
 
     fn clear(&mut self) -> anyhow::Result<()> {
-        // Rewrite with just the header so the SAME key keeps working.
-        let mut f = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.path)?;
-        writeln!(f, "{}", self.header_line)?;
-        Ok(())
+        self.replace(&[])
+    }
+
+    fn replace(&mut self, events: &[Event]) -> anyhow::Result<()> {
+        let mut body = self.header_line.clone();
+        body.push('\n');
+        for event in events {
+            body.push_str(&self.encrypt_event(event)?);
+            body.push('\n');
+        }
+        super::atomic_write(&self.path, body.as_bytes())
     }
 
     fn path(&self) -> PathBuf {

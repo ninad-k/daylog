@@ -35,8 +35,33 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+fn instance_guard() -> anyhow::Result<std::fs::File> {
+    let path = config::config_path().with_file_name("daylog.lock");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    file.try_lock().map_err(|e| {
+        anyhow::anyhow!("Another daylog instance is running, or its lock is unavailable: {e}")
+    })?;
+    Ok(file)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // A second process must never append competing sessions to the same history.
+    let _instance_guard = match instance_guard() {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("Cannot start daylog: {e}");
+            return;
+        }
+    };
     let shared: SharedCore = Arc::new(Mutex::new(Core::bootstrap()));
     let show_on_launch = { shared.lock().unwrap().config.show_window_on_launch };
 
@@ -50,15 +75,15 @@ pub fn run() {
         .manage(shared.clone())
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
-            commands::set_config,
+            commands::save_settings,
             commands::get_status,
+            commands::retry_storage,
             commands::pause,
             commands::resume,
             commands::clear_logs,
             commands::query,
             commands::analytics,
             commands::unlock,
-            commands::set_encryption,
             commands::export,
             commands::reveal_log,
         ])
@@ -101,23 +126,36 @@ pub fn run() {
                         "toggle" => {
                             let status = {
                                 let mut c = core.lock().unwrap();
-                                c.flush_current();
-                                c.paused = !c.paused;
+                                if c.paused {
+                                    match c.retry_storage() {
+                                        Ok(()) => c.paused = false,
+                                        Err(e) => c.last_error = Some(e.to_string()),
+                                    }
+                                } else {
+                                    if let Err(e) = c.flush_current() { c.last_error = Some(e.to_string()); }
+                                    c.paused = true;
+                                }
                                 c.status()
                             };
                             let _ = app.emit("daylog://status", status);
                         }
                         "clear" => {
-                            let status = {
-                                let mut c = core.lock().unwrap();
-                                let _ = c.clear();
-                                c.status()
-                            };
-                            let _ = app.emit("daylog://status", status);
+                            use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+                            let handle = app.clone();
+                            app.dialog().message("Delete all sessions from the active log? This cannot be undone.")
+                                .title("Clear daylog history")
+                                .buttons(MessageDialogButtons::OkCancelCustom("Delete history".into(), "Cancel".into()))
+                                .show(move |confirmed| {
+                                    if confirmed {
+                                        let core = handle.state::<SharedCore>();
+                                        let mut c = core.lock().unwrap();
+                                        if let Err(e) = c.clear() { c.last_error = Some(e.to_string()); }
+                                        let _ = handle.emit("daylog://status", c.status());
+                                    }
+                                });
                         }
                         "quit" => {
                             // Flush the in-progress session before exiting.
-                            core.lock().unwrap().flush_current();
                             app.exit(0);
                         }
                         _ => {}
@@ -155,6 +193,18 @@ pub fn run() {
                 api.prevent_close();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running daylog");
+        .build(tauri::generate_context!())
+        .expect("error while building daylog")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                let core = app.state::<SharedCore>();
+                let mut c = core.lock().unwrap();
+                if let Err(e) = c.flush_current() {
+                    c.last_error = Some(format!("Could not save before quitting: {e}. Fix storage and try again."));
+                    api.prevent_exit();
+                    show_main_window(app);
+                    let _ = app.emit("daylog://status", c.status());
+                }
+            }
+        });
 }

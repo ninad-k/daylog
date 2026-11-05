@@ -2,7 +2,7 @@
 //!
 //! The password is NEVER written here (or anywhere). When encryption is on,
 //! the key is derived from the password at unlock time via Argon2 and only the
-//! Argon2 salt lives on disk, inside the encrypted log header — see `storage`.
+//! salt and encrypted verifier live in the log header — see `storage`.
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,9 @@ use std::path::PathBuf;
 
 fn default_poll_ms() -> u64 {
     1500
+}
+fn default_idle_seconds() -> Option<u64> {
+    Some(300)
 }
 fn default_true() -> bool {
     true
@@ -37,13 +40,17 @@ pub struct Config {
     #[serde(default)]
     pub start_on_login: bool,
 
-    /// Delete events older than N days on startup. None = keep forever.
+    /// Delete expired events on startup and hourly. None = keep forever.
     #[serde(default)]
     pub auto_purge_days: Option<u32>,
 
     /// How often the capture loop samples the active window, in milliseconds.
     #[serde(default = "default_poll_ms")]
     pub poll_interval_ms: u64,
+
+    /// Stop counting after this many seconds without OS input. None disables it.
+    #[serde(default = "default_idle_seconds")]
+    pub idle_threshold_seconds: Option<u64>,
 
     /// Show the main window when the app launches (otherwise tray-only).
     /// Default on — this is a visible tool, not a hidden one.
@@ -62,6 +69,7 @@ impl Default for Config {
             auto_purge_days: None,
             poll_interval_ms: default_poll_ms(),
             show_window_on_launch: true,
+            idle_threshold_seconds: default_idle_seconds(),
         }
     }
 }
@@ -73,24 +81,58 @@ pub fn project_dirs() -> Option<ProjectDirs> {
 }
 
 pub fn default_log_path() -> PathBuf {
-    project_dirs()
-        .map(|d| d.data_dir().join("activity.log"))
+    portable_root()
+        .map(|p| p.join("activity.log"))
+        .or_else(|| project_dirs().map(|d| d.data_dir().join("activity.log")))
         .unwrap_or_else(|| PathBuf::from("activity.log"))
 }
 
-fn config_path() -> PathBuf {
-    project_dirs()
-        .map(|d| d.config_dir().join("config.json"))
+fn portable_root() -> Option<PathBuf> {
+    std::env::var_os("DAYLOG_HOME").map(PathBuf::from)
+}
+
+pub fn config_path() -> PathBuf {
+    portable_root()
+        .map(|p| p.join("config.json"))
+        .or_else(|| project_dirs().map(|d| d.config_dir().join("config.json")))
         .unwrap_or_else(|| PathBuf::from("daylog-config.json"))
 }
 
 impl Config {
-    pub fn load() -> Self {
+    pub fn load() -> anyhow::Result<Self> {
         let p = config_path();
         match std::fs::read_to_string(&p) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(_) => Config::default(),
+            Ok(s) => Ok(serde_json::from_str(&s)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+            Err(e) => Err(e.into()),
         }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.log_path.is_absolute(), "Log path must be absolute");
+        anyhow::ensure!(
+            self.log_path.file_name().is_some(),
+            "Choose a log file, not a directory"
+        );
+        anyhow::ensure!(!self.log_path.is_dir(), "Log path is a directory");
+        anyhow::ensure!(
+            (250..=60_000).contains(&self.poll_interval_ms),
+            "Sampling interval must be 250–60000 ms"
+        );
+        anyhow::ensure!(
+            self.auto_purge_days != Some(0),
+            "Retention must be at least one day"
+        );
+        anyhow::ensure!(
+            self.idle_threshold_seconds
+                .is_none_or(|v| (30..=86400).contains(&v)),
+            "Idle threshold must be 30–86400 seconds"
+        );
+        anyhow::ensure!(
+            self.blocklist.len() <= 1000,
+            "Blocklist is limited to 1000 entries"
+        );
+        Ok(())
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -98,7 +140,38 @@ impl Config {
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&p, serde_json::to_vec_pretty(self)?)?;
+        crate::storage::atomic_write(&p, &serde_json::to_vec_pretty(self)?)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn legacy_settings_get_safe_defaults() {
+        let config: Config =
+            serde_json::from_value(serde_json::json!({"log_path": "/tmp/activity.log"})).unwrap();
+        assert_eq!(config.idle_threshold_seconds, Some(300));
+        assert_eq!(config.poll_interval_ms, 1500);
+        assert!(!config.encryption_enabled);
+        assert!(config.validate().is_ok());
+    }
+    #[test]
+    fn invalid_settings_are_rejected_before_any_write() {
+        let mut config = Config {
+            log_path: PathBuf::from("relative.log"),
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+        config.log_path = std::env::temp_dir().join("daylog-config-test.log");
+        config.poll_interval_ms = 0;
+        assert!(config.validate().is_err());
+        config.poll_interval_ms = 1500;
+        config.idle_threshold_seconds = Some(0);
+        assert!(config.validate().is_err());
+        config.idle_threshold_seconds = None;
+        config.auto_purge_days = Some(0);
+        assert!(config.validate().is_err());
     }
 }

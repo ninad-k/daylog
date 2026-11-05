@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Privacy-respecting personal activity logger — tracks which apps and windows you use and for how long. No keystroke capture."
 authors = ["Ninad K"]
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.90"
 license = "MIT"
 repository = "https://github.com/ninad-k/daylog"
 
@@ -38,6 +38,10 @@ argon2 = "0.5"
 rand = "0.8"
 base64 = "0.22"
 zeroize = "1"
+tempfile = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.8"
 
 [features]
 # default production build

@@ -40,6 +40,8 @@
     </nav>
 
     <main>
+      <div id="error-banner" class="warn-banner hidden" role="alert"></div>
+      <div class="status-note"><span id="capture-note" role="status"></span> <button id="retry-storage" class="ghost">Retry storage</button></div>
       <!-- DASHBOARD -->
       <section id="tab-dashboard" class="tab-panel active">
         <div class="range-row">
@@ -106,7 +108,7 @@
             </thead>
             <tbody id="log-body"></tbody>
           </table>
-          <div id="log-empty" class="empty">No entries match.</div>
+          <div id="log-empty" class="empty hidden">No entries match.</div>
         </div>
       </section>
 
@@ -123,7 +125,7 @@
         <div class="card">
           <h3>Storage</h3>
           <label class="field">
-            <span>Log file path</span>
+            <span>Log file path (change path and encryption separately)</span>
             <div class="row">
               <input id="s-path" type="text" />
               <button id="open-folder" class="ghost">Open folder</button>
@@ -142,7 +144,7 @@
             <span>Encrypt the log at rest</span>
           </label>
           <label class="field" id="enc-pw-field">
-            <span>Password (required to enable; needed each session to read)</span>
+            <span>Password (required to enable encryption or open an encrypted path)</span>
             <input id="s-enc-pw" type="password" autocomplete="off" placeholder="••••••••" />
           </label>
         </div>
@@ -170,8 +172,12 @@
             <span>Show window on launch (otherwise tray-only)</span>
           </label>
           <label class="field">
+            <span>Idle threshold (seconds, 30–86400; blank disables idle detection)</span>
+            <input id="s-idle" type="number" min="30" max="86400" placeholder="300" />
+          </label>
+          <label class="field">
             <span>Sampling interval (ms)</span>
-            <input id="s-poll" type="number" min="250" step="250" />
+            <input id="s-poll" type="number" min="250" max="60000" step="250" />
           </label>
         </div>
 

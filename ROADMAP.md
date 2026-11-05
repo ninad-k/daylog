@@ -1,6 +1,6 @@
 # Roadmap
 
-daylog grows in add-on phases. Phase 1 is shipped; later phases are planned and not yet built.
+daylog grows in add-on phases. The core tracker and reliability work are implemented. Remaining phases below are planned enhancements.
 
 > Across all phases, daylog will never capture keystrokes, typed text, passwords, clipboard, or screen contents.
 
@@ -18,25 +18,33 @@ daylog grows in add-on phases. Phase 1 is shipped; later phases are planned and 
 - Pause / resume and clear logs
 - System tray with quick actions
 
-## Phase 2: Idle detection and storage migration (planned)
+## Phase 2: Idle detection and storage migration (implemented)
 
-- OS-level idle detection so time is not counted while the machine is idle or the user is away
+- OS idle timers on macOS, Windows, and Linux/X11, without input hooks
+- Sleep and clock-gap protection
+- Durable session checkpoints and atomic retention
+- Cached history, live analytics, and visible storage failures
 - Configurable idle threshold
-- Migrate existing events between plaintext and encrypted storage when the encryption toggle is flipped
+- Migrate existing events between plaintext and encrypted storage when encryption changes
+- Password verification for empty encrypted logs
+- Backend and frontend regression tests, run in CI
 
 ## Phase 3: Richer analytics (planned)
 
-- Daily and weekly summary views, plus optional summary emails
+- Dedicated daily and weekly summary views (current dashboard already supports today, 7 days, 30 days, and all time)
 - Category tagging of apps (e.g. work, communication, entertainment)
 - Time goals and limits per app or category
 
 ## Phase 4: Search improvements (planned)
 
-- Faster, more flexible search over large logs
+- Indexed search for histories too large for the current in-memory cache
 - Saved filters
 - Combined filters across app, category, date range, and keyword
 
-## Phase 5: Packaging and distribution (planned)
+## Phase 5: Packaging and distribution (partially implemented)
+
+- Manual CI workflow builds unsigned installer artifacts for all three desktop platforms
+- macOS application bundle built locally; other platforms require their CI runners
 
 - macOS: code signing and notarization
 - Windows: MSI installer and winget package, code signing

@@ -118,8 +118,7 @@ th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--bor
 th { color: var(--text-dim); font-weight: 600; position: sticky; top: 0; background: var(--bg-elev); }
 td.title { color: var(--text-dim); max-width: 440px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 tbody tr:hover { background: var(--bg-elev2); }
-#log-body:empty + #log-empty { display: block; }
-#log-empty { display: none; }
+#log-empty { padding: 16px; }
 
 /* ---- Buttons ---- */
 button { font-family: inherit; }
@@ -157,3 +156,15 @@ button { font-family: inherit; }
 .lock-card p { color: var(--text-dim); margin: 0 0 18px; }
 .lock-card input { width: 100%; margin-bottom: 12px; }
 .lock-card .primary { width: 100%; }
+
+.status-note { color: var(--text-dim); display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; font-size: 12px; }
+button:disabled { opacity: 0.6; cursor: wait; }
+.table-wrap { overflow-x: auto; }
+@media (max-width: 800px) {
+  .tag { display: none; }
+  .topbar { flex-wrap: wrap; gap: 8px; padding: 12px; }
+  .pill { max-width: 160px; }
+  main { padding: 12px; }
+  .bar-row { grid-template-columns: 120px 1fr 72px; }
+  .stat-value { font-size: 22px; }
+}

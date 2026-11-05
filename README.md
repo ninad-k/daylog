@@ -2,7 +2,7 @@
 
 **A transparent, privacy-respecting activity logger that shows where your time goes.**
 
-![Rust](https://img.shields.io/badge/Rust-stable_1.77%2B-orange?logo=rust)
+![Rust](https://img.shields.io/badge/Rust-stable_1.90%2B-orange?logo=rust)
 ![Tauri](https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green)
 
@@ -16,22 +16,24 @@
 
 ## ✨ Features
 
+- **Idle detection**: stops counting after a configurable OS idle threshold (5 minutes by default), with sleep-gap protection.
+- **Crash recovery**: sessions checkpoint every 30 seconds; status and queries use cached history.
 - **Activity tracking**: records the focused app, window title, and time spent, written to a local log file.
 - **Analytics**: per-app and per-day breakdowns of where your time went.
 - **Search and filter**: by app, date range, or keyword.
 - **Export**: CSV and Markdown.
 - **Configurable log path**: keep the log wherever you like.
-- **Optional encryption**: AES-256-GCM with an Argon2id-derived key. Only the salt is stored; your password is never persisted.
+- **Optional encryption**: AES-256-GCM with an Argon2id-derived key. History migrates when switching modes; your password is never persisted.
 - **Exclusion blocklist**: logging pauses automatically while a blocked app or window title is focused (password managers, banking, private documents).
 - **Start on login**: toggle via `tauri-plugin-autostart`.
-- **Auto-purge**: delete events older than N days.
+- **Auto-purge**: atomically delete expired events at startup and hourly while running.
 - **Pause / resume** and **clear logs** at any time.
 - **System tray** with quick actions.
 - **Tiny frontend**: plain HTML/CSS/JS in `ui/`, no framework and no npm build step.
 
 ## 🖼️ Screenshots
 
-Screenshots will live in [`docs/`](docs/) and can be added at any time. Suggested files:
+Screenshots can be added under [`docs/`](docs/). Suggested files:
 
 | View | File |
 | --- | --- |
@@ -103,7 +105,8 @@ Settings are stored in the OS config directory and edited from the Settings scre
 | Exclusion blocklist | Apps or window-title patterns that pause logging while focused | Empty |
 | Start on login | Launch daylog automatically at login | Off |
 | Auto-purge days | Delete events older than N days | Off |
-| Poll interval | How often the active window is sampled (ms; floor 250) | `1500` |
+| Poll interval | How often the active window is sampled (250–60000 ms) | `1500` |
+| Idle threshold | Stop counting after this many seconds without input; blank disables | `300` |
 
 ## 🔐 Permissions
 
@@ -126,7 +129,7 @@ The full statement is in **[docs/PRIVACY.md](docs/PRIVACY.md)**. Honest highligh
 
 ## 🗺️ Roadmap
 
-Phase 1 is complete. Idle detection, richer analytics, search improvements, and signed installers are planned. See **[ROADMAP.md](ROADMAP.md)**.
+The core tracker, idle detection, encryption migration, and reliability work are implemented. Richer analytics and signed distribution remain future enhancements. See **[ROADMAP.md](ROADMAP.md)**.
 
 ## 🤝 Contributing
 
@@ -137,3 +140,21 @@ Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first. Note t
 MIT © 2026 Ninad K. See [LICENSE](LICENSE).
 
 Repository: <https://github.com/ninad-k/daylog>
+
+## Reliability and development checks
+
+Run backend and frontend checks with:
+
+```bash
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml --locked
+node --test tests/ui.test.cjs
+```
+
+Node 22+ is used only for frontend tests; running and packaging the app needs no Node toolchain.
+The manual **Installer packages** workflow builds unsigned macOS, Windows, and Linux artifacts without publishing them. See [release instructions](docs/RELEASING.md).
+
+For isolated testing or portable storage, set `DAYLOG_HOME` to an absolute directory. This puts settings, the process lock, and the default log there. Without it, the normal OS directories are used.
+
+Queries include the current session. Analytics clips sessions to the selected time range and splits time across local calendar days. The log table filters by session start, and its row limit also applies to exports. Checkpoints reuse session IDs; the latest complete revision wins when reopening a log. A crash may lose up to 30 seconds, plus one sampling interval. A damaged complete record produces a visible error; an incomplete final record is discarded during recovery.

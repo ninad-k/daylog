@@ -38,9 +38,12 @@ Layers are cleanly separated. Keep it that way.
 - **Frontend stays plain.** No bundlers or frameworks.
 - **Format and lint** before pushing:
   ```bash
+  cd src-tauri
   cargo fmt --all
   cargo clippy --all-targets -- -D warnings
   cargo test
+  cd ..
+  node --test tests/ui.test.cjs
   ```
 - Keep privacy in mind: no network calls, no telemetry.
 

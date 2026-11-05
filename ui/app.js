@@ -3,6 +3,21 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const $ = (id) => document.getElementById(id);
+let latestStatus = null;
+let savedConfig = null;
+let refreshBusy = false;
+let uiError = null;
+
+function showError(error) {
+  uiError = String(error);
+  $("error-banner").textContent = uiError;
+  $("error-banner").classList.remove("hidden");
+  setTimeout(() => { uiError = null; if (latestStatus) renderStatus(latestStatus); }, 10000);
+}
+window.addEventListener("unhandledrejection", (event) => {
+  event.preventDefault();
+  showError(event.reason);
+});
 
 // ---------- helpers ----------
 function fmtDur(secs) {
@@ -34,7 +49,7 @@ function rangeFilter(range) {
 
 function dateInputToISO(val, endOfDay) {
   if (!val) return null;
-  const d = new Date(val + (endOfDay ? "T23:59:59" : "T00:00:00"));
+  const d = new Date(val + (endOfDay ? "T23:59:59.999" : "T00:00:00"));
   return d.toISOString();
 }
 
@@ -46,12 +61,22 @@ function toast(el, msg, isErr) {
 
 // ---------- status ----------
 function renderStatus(st) {
+  latestStatus = st;
+  $("error-banner").textContent = st.error || uiError || "";
+  $("error-banner").classList.toggle("hidden", !st.error && !uiError);
+  $("retry-storage").classList.toggle("hidden", !st.error);
+  $("capture-note").textContent = !st.capture_available
+    ? "No active window available. Check OS permissions if this persists."
+    : !st.idle_available && savedConfig?.idle_threshold_seconds !== null ? "OS idle detection is unavailable on this desktop." : "";
   const state = $("pill-state");
   if (st.locked) {
     state.textContent = "locked";
     state.className = "pill paused";
   } else if (st.paused) {
     state.textContent = "paused";
+    state.className = "pill paused";
+  } else if (st.error || st.excluded || st.idle || !st.capture_available) {
+    state.textContent = st.error ? "storage error" : st.excluded ? "excluded" : st.idle ? "idle" : "waiting";
     state.className = "pill paused";
   } else {
     state.textContent = "logging";
@@ -67,7 +92,7 @@ function renderStatus(st) {
   cur.textContent = st.current_app ? st.current_app : "idle";
   cur.title = st.current_title || "";
 
-  if (st.locked) $("lock-overlay").classList.remove("hidden");
+  $("lock-overlay").classList.toggle("hidden", !st.locked);
 }
 
 async function refreshStatus() {
@@ -79,7 +104,7 @@ async function loadDashboard() {
   const filter = rangeFilter($("range-select").value);
   let a;
   try { a = await invoke("analytics", { filter }); }
-  catch (e) { console.error(e); return; }
+  catch (e) { showError(e); return; }
 
   $("stat-total").textContent = fmtDur(a.total_seconds);
   $("stat-events").textContent = a.total_events.toLocaleString();
@@ -132,8 +157,9 @@ function currentLogFilter() {
 async function loadLog() {
   let rows;
   try { rows = await invoke("query", { filter: currentLogFilter() }); }
-  catch (e) { console.error(e); return; }
+  catch (e) { showError(e); return; }
   const body = $("log-body");
+  $("log-empty").classList.toggle("hidden", rows.length > 0);
   body.innerHTML = rows.map((r) => {
     const start = new Date(r.start).toLocaleString();
     return `<tr>
@@ -147,17 +173,23 @@ async function loadLog() {
 
 async function doExport(fmt) {
   try {
-    const path = await invoke("export", { format: fmt, filter: currentLogFilter(), dest: null });
+    const dest = await window.__TAURI__.dialog.save({
+      defaultPath: `daylog-export.${fmt}`,
+      filters: [{ name: fmt === "csv" ? "CSV" : "Markdown", extensions: [fmt] }],
+    });
+    if (!dest) return;
+    const path = await invoke("export", { format: fmt, filter: currentLogFilter(), dest });
     const note = $("export-note");
     note.classList.remove("hidden");
     note.textContent = `Exported to ${path}`;
-  } catch (e) { alert("Export failed: " + e); }
+  } catch (e) { showError("Export failed: " + e); }
 }
 
 // ---------- settings ----------
 async function loadSettings() {
   let c;
-  try { c = await invoke("get_config"); } catch (e) { console.error(e); return; }
+  try { c = await invoke("get_config"); } catch (e) { showError(e); return; }
+  savedConfig = c;
   $("s-path").value = c.log_path;
   $("s-purge").value = c.auto_purge_days ?? "";
   $("s-enc").checked = c.encryption_enabled;
@@ -166,6 +198,7 @@ async function loadSettings() {
   $("s-autostart").checked = c.start_on_login;
   $("s-show").checked = c.show_window_on_launch;
   $("s-poll").value = c.poll_interval_ms;
+  $("s-idle").value = c.idle_threshold_seconds ?? "";
 }
 
 async function saveSettings() {
@@ -177,29 +210,35 @@ async function saveSettings() {
   const purgeRaw = $("s-purge").value.trim();
   const cfg = {
     log_path: $("s-path").value.trim(),
-    encryption_enabled: encWanted, // backend reopen handled via set_encryption below
+    encryption_enabled: encWanted,
     exclusion_enabled: $("s-excl").checked,
     blocklist: $("s-blocklist").value.split("\n").map((s) => s.trim()).filter(Boolean),
     start_on_login: $("s-autostart").checked,
     auto_purge_days: purgeRaw ? parseInt(purgeRaw, 10) : null,
     poll_interval_ms: Math.max(250, parseInt($("s-poll").value, 10) || 1500),
     show_window_on_launch: $("s-show").checked,
+    idle_threshold_seconds: $("s-idle").value.trim() ? Number($("s-idle").value) : null,
   };
 
+  if (!savedConfig) { toast(note, "Reload settings before saving.", true); return; }
+  const enabling = encWanted && !savedConfig.encryption_enabled;
+  if (enabling && !encPw) { toast(note, "Enter a password to enable encryption.", true); return; }
+  if (encWanted !== savedConfig.encryption_enabled) {
+    const message = encWanted
+      ? "Encrypt and migrate your history? The old plaintext log will be removed after migration. Backups and exports remain unchanged."
+      : "Decrypt your history into a readable plaintext log?";
+    if (!await window.__TAURI__.dialog.confirm(message, { title: "Change encryption", kind: "warning" })) return;
+  }
+  $("save-settings").disabled = true;
   try {
-    // set_config persists everything and reopens the store when NOT switching to encrypted.
-    let st = await invoke("set_config", { config: cfg });
-    // Encryption on/off needs the password, so drive it explicitly.
-    if (encWanted) {
-      if (!encPw) { toast(note, "Enter a password to enable encryption.", true); return; }
-      st = await invoke("set_encryption", { enabled: true, password: encPw });
-    } else if (st.encrypted) {
-      st = await invoke("set_encryption", { enabled: false, password: null });
-    }
+    const st = await invoke("save_settings", { config: cfg, password: encPw || null });
     renderStatus(st);
     toast(note, "Saved.");
     $("s-enc-pw").value = "";
+    await loadSettings();
+    await loadDashboard();
   } catch (e) { toast(note, "Save failed: " + e, true); }
+  finally { $("save-settings").disabled = false; }
 }
 
 // ---------- unlock ----------
@@ -241,23 +280,38 @@ function wire() {
   $("export-csv").addEventListener("click", () => doExport("csv"));
   $("export-md").addEventListener("click", () => doExport("md"));
   $("clear-logs").addEventListener("click", async () => {
-    if (!confirm("Delete ALL logged entries? This cannot be undone.")) return;
+    if (!await window.__TAURI__.dialog.confirm("Delete all sessions from the active log? This cannot be undone.", { title: "Clear history", kind: "warning" })) return;
     await invoke("clear_logs");
     loadLog(); loadDashboard(); refreshStatus();
   });
-  $("open-folder").addEventListener("click", () => invoke("reveal_log").catch((e) => alert(e)));
+  $("open-folder").addEventListener("click", () => invoke("reveal_log").catch(showError));
   $("save-settings").addEventListener("click", saveSettings);
   $("unlock-btn").addEventListener("click", doUnlock);
   $("unlock-pw").addEventListener("keydown", (e) => { if (e.key === "Enter") doUnlock(); });
 
   // Live status from the capture loop.
-  listen("daylog://status", (ev) => renderStatus(ev.payload));
+  listen("daylog://status", (ev) => renderStatus(ev.payload)).catch(showError);
+  $("retry-storage").addEventListener("click", async () => {
+    renderStatus(await invoke("retry_storage"));
+    await refreshVisible();
+  });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshVisible(); });
+  setInterval(refreshVisible, 5000);
+}
+
+async function refreshVisible() {
+  if (document.hidden || refreshBusy || !latestStatus || latestStatus.locked) return;
+  refreshBusy = true;
+  try {
+    if ($("tab-dashboard").classList.contains("active")) await loadDashboard();
+    if ($("tab-log").classList.contains("active")) await loadLog();
+  } finally { refreshBusy = false; }
 }
 
 async function boot() {
   wire();
   let st;
-  try { st = await invoke("get_status"); } catch (e) { console.error(e); return; }
+  try { st = await invoke("get_status"); } catch (e) { showError(e); return; }
   renderStatus(st);
   if (!st.locked) { loadDashboard(); loadSettings(); }
 }

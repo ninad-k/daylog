@@ -111,6 +111,11 @@ pub struct Analytics {
 #[derive(Debug, Clone, Serialize)]
 pub struct Status {
     pub paused: bool,
+    pub excluded: bool,
+    pub idle: bool,
+    pub idle_available: bool,
+    pub capture_available: bool,
+    pub error: Option<String>,
     pub encrypted: bool,
     /// True when an encrypted store is loaded but still locked (no password this session).
     pub locked: bool,

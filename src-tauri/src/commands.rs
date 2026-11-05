@@ -27,44 +27,41 @@ pub fn get_status(core: State<'_, SharedCore>) -> R<Status> {
     Ok(lock(&core).status())
 }
 
-/// Persist a new config and apply the parts that need action right now:
-/// start-on-login registration, and reopening the store when the path or
-/// encryption flag changed.
+/// Apply all settings in one operation; encryption changes require an unlocked
+/// source and a verified destination. Roll back autostart if preparation fails.
 #[tauri::command]
-pub fn set_config(app: AppHandle, core: State<'_, SharedCore>, config: Config) -> R<Status> {
+pub fn save_settings(
+    app: AppHandle,
+    core: State<'_, SharedCore>,
+    config: Config,
+    password: Option<String>,
+) -> R<Status> {
+    config.validate().map_err(|e| e.to_string())?;
     let mut c = lock(&core);
-    let old = c.config.clone();
-
-    // Apply start-on-login via the autostart plugin.
-    if config.start_on_login != old.start_on_login {
-        let m = app.autolaunch();
-        let res = if config.start_on_login {
-            m.enable()
+    let old_autostart = c.config.start_on_login;
+    let changed = old_autostart != config.start_on_login;
+    if changed {
+        let manager = app.autolaunch();
+        if config.start_on_login {
+            manager.enable()
         } else {
-            m.disable()
-        };
-        res.map_err(|e| format!("start-on-login: {e}"))?;
-    }
-
-    let path_changed = config.log_path != old.log_path;
-    c.config = config;
-    // Encryption is toggled ONLY through `set_encryption` (which verifies the
-    // password and opens the store before persisting the flag). Ignore any
-    // change the caller tried to make here so this path can never leave the
-    // config claiming "encrypted" while a plaintext store stays live.
-    c.config.encryption_enabled = old.encryption_enabled;
-    c.config.save().map_err(|e| e.to_string())?;
-
-    // Reopen the store when the destination path changed.
-    if path_changed {
-        c.flush_current();
-        if c.config.encryption_enabled {
-            // New encrypted path needs the password again — lock until `unlock`,
-            // rather than writing to the new file with a key we haven't re-derived.
-            c.store_lock();
-        } else {
-            c.open_store(None).map_err(|e| e.to_string())?;
+            manager.disable()
         }
+        .map_err(|e| format!("Start on login: {e}"))?;
+    }
+    if let Err(e) = c.apply_config(config, password.as_deref()) {
+        if changed {
+            let manager = app.autolaunch();
+            let rollback = if old_autostart {
+                manager.enable()
+            } else {
+                manager.disable()
+            };
+            if let Err(rollback) = rollback {
+                return Err(format!("{e}. Autostart rollback failed: {rollback}"));
+            }
+        }
+        return Err(e.to_string());
     }
     Ok(c.status())
 }
@@ -72,7 +69,7 @@ pub fn set_config(app: AppHandle, core: State<'_, SharedCore>, config: Config) -
 #[tauri::command]
 pub fn pause(core: State<'_, SharedCore>) -> R<Status> {
     let mut c = lock(&core);
-    c.flush_current();
+    c.flush_current().map_err(|e| e.to_string())?;
     c.paused = true;
     Ok(c.status())
 }
@@ -80,6 +77,7 @@ pub fn pause(core: State<'_, SharedCore>) -> R<Status> {
 #[tauri::command]
 pub fn resume(core: State<'_, SharedCore>) -> R<Status> {
     let mut c = lock(&core);
+    c.retry_storage().map_err(|e| e.to_string())?;
     c.paused = false;
     Ok(c.status())
 }
@@ -101,48 +99,21 @@ pub fn analytics(core: State<'_, SharedCore>, filter: EventFilter) -> R<Analytic
     lock(&core).analytics(&filter).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn retry_storage(core: State<'_, SharedCore>) -> R<Status> {
+    let mut c = lock(&core);
+    c.retry_storage().map_err(|e| e.to_string())?;
+    Ok(c.status())
+}
+
 /// Unlock an encrypted store with the session password (wrong password errors).
 #[tauri::command]
 pub fn unlock(core: State<'_, SharedCore>, password: String) -> R<Status> {
     let mut c = lock(&core);
-    c.open_store(Some(&password)).map_err(|e| e.to_string())?;
-    Ok(c.status())
-}
-
-/// Turn encryption on (needs a password) or off, then reopen the store.
-#[tauri::command]
-pub fn set_encryption(
-    core: State<'_, SharedCore>,
-    enabled: bool,
-    password: Option<String>,
-) -> R<Status> {
-    let mut c = lock(&core);
-    c.flush_current();
-    let prev = c.config.encryption_enabled;
-
-    // Fail-safe: open (and for encryption, verify the password against) the new
-    // store BEFORE persisting the flag. If anything fails we revert the flag and
-    // drop the store, so we never keep writing plaintext while the config claims
-    // the log is encrypted. `open_store` reads `encryption_enabled` to pick the
-    // backend + path, so set it first, then roll back on error.
-    c.config.encryption_enabled = enabled;
-    let opened = if enabled {
-        match password {
-            Some(pw) if !pw.is_empty() => c.open_store(Some(&pw)),
-            Some(_) => Err(anyhow::anyhow!("password cannot be empty")),
-            None => Err(anyhow::anyhow!("password required to enable encryption")),
-        }
-    } else {
-        c.open_store(None)
-    };
-    if let Err(e) = opened {
-        c.config.encryption_enabled = prev;
-        c.store_lock(); // ensure no stale plaintext store survives a failed enable
-        return Err(e.to_string());
+    if !c.is_locked() {
+        return Ok(c.status());
     }
-
-    // Only now is it safe to persist the new encryption state.
-    c.config.save().map_err(|e| e.to_string())?;
+    c.open_store(Some(&password)).map_err(|e| e.to_string())?;
     Ok(c.status())
 }
 
@@ -158,6 +129,12 @@ pub fn export(
     let c = lock(&core);
     let events = c.query(&filter).map_err(|e| e.to_string())?;
     let base = c.active_path();
+    let protected = [
+        c.config.log_path.clone(),
+        crate::storage::active_path(&c.config.log_path, true),
+        crate::config::config_path(),
+        crate::config::config_path().with_file_name("daylog.lock"),
+    ];
     drop(c);
 
     let fmt = format.to_lowercase();
@@ -175,8 +152,24 @@ pub fn export(
     } else {
         render_csv(&events)
     };
-    std::fs::write(&dest, body).map_err(|e| e.to_string())?;
+    if protected.iter().any(|path| same_destination(&dest, path)) {
+        return Err("Export cannot overwrite daylog history or configuration".into());
+    }
+    crate::storage::atomic_write(&dest, body.as_bytes()).map_err(|e| e.to_string())?;
     Ok(dest.display().to_string())
+}
+
+fn same_destination(a: &std::path::Path, b: &std::path::Path) -> bool {
+    fn resolved(path: &std::path::Path) -> PathBuf {
+        path.canonicalize().unwrap_or_else(|_| {
+            let parent = path.parent().unwrap_or(std::path::Path::new("."));
+            parent
+                .canonicalize()
+                .unwrap_or_else(|_| parent.to_path_buf())
+                .join(path.file_name().unwrap_or_default())
+        })
+    }
+    resolved(a) == resolved(b)
 }
 
 fn local(ts: chrono::DateTime<chrono::Utc>) -> String {
@@ -188,7 +181,14 @@ fn local(ts: chrono::DateTime<chrono::Utc>) -> String {
 
 fn csv_field(s: &str) -> String {
     // RFC-4180-ish quoting.
-    if s.contains([',', '"', '\n']) {
+    let protected;
+    let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        protected = format!("'{s}");
+        protected.as_str()
+    } else {
+        s
+    };
+    if s.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
@@ -211,7 +211,21 @@ fn render_csv(events: &[Event]) -> String {
 }
 
 fn md_field(s: &str) -> String {
-    s.replace('|', "\\|").replace('\n', " ")
+    let mut out = String::new();
+    for character in s.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\n' | '\r' => out.push(' '),
+            '\\' | '|' | '[' | ']' | '!' | '`' | '*' | '_' => {
+                out.push('\\');
+                out.push(character);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn render_markdown(events: &[Event]) -> String {
@@ -243,4 +257,16 @@ pub fn reveal_log(app: AppHandle, core: State<'_, SharedCore>) -> R<()> {
     app.opener()
         .open_path(dir.display().to_string(), None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn exports_escape_cells_and_neutralize_spreadsheet_formulas() {
+        assert_eq!(csv_field("a,\"b\""), "\"a,\"\"b\"\"\"");
+        assert_eq!(csv_field("=1+1"), "'=1+1");
+        assert_eq!(csv_field("line\rbreak"), "\"line\rbreak\"");
+        assert_eq!(md_field("a|b\nc"), "a\\|b c");
+    }
 }

@@ -4,7 +4,7 @@ daylog is a Rust + Tauri v2 app. The Rust crate lives in `src-tauri/`; the front
 
 ## Prerequisites
 
-- **Rust** stable, 1.77 or newer: <https://rustup.rs>
+- **Rust** stable, 1.90 or newer: <https://rustup.rs>
 - **Tauri v2 CLI**:
   ```bash
   cargo install tauri-cli --version "^2"
@@ -102,3 +102,14 @@ The binary is unsigned. Choose "More info" then "Run anyway" if you built it you
 
 **macOS Gatekeeper blocks the app.**
 For a locally built, unsigned app, right-click the app and choose Open, or allow it under System Settings, Privacy & Security.
+
+## Isolated smoke test
+
+```bash
+DAYLOG_HOME=/absolute/path/to/test-data cargo tauri dev
+```
+
+Use a disposable directory to keep testing separate from your normal history.
+On Linux, install the runtime package `libxss1` for X11 idle detection. The app reports when the idle timer is unavailable; on Wayland, both focus and idle information depend on compositor support.
+
+See [RELEASING.md](RELEASING.md) for installer builds and signing requirements.

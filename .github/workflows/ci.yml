@@ -31,7 +31,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
-            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+            libxdo-dev libxss-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
       - name: Check formatting
         working-directory: src-tauri
@@ -44,3 +44,16 @@ jobs:
       - name: Build
         working-directory: src-tauri
         run: cargo build --release
+
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test --all-targets
+
+      - name: Check frontend syntax
+        run: node --check ui/app.js
+
+      - name: Test frontend interactions
+        run: node --test tests/frontend.test.cjs
+
+      - name: Check packaging tools
+        run: python -m unittest discover -s packaging -p "test_*.py"

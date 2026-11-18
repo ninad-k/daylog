@@ -2,9 +2,11 @@
 
 Thanks for your interest in daylog. Contributions of all sizes are welcome.
 
-## 🚫 Non-goal: keystroke or text capture
+## Text recording and privacy boundaries
 
-daylog records only the active app name, window title, and duration. **Pull requests must never add keystroke, typed-text, clipboard, password, screenshot, or screen-content capture.** No keyboard hooks, no `rdev`, no input monitoring. This is a deliberate design choice and an explicit non-goal. Such PRs will be closed.
+Activity tracking records the active app name, window title, and duration by default. Optional Windows text recording must remain **off by default**, require **explicit selected-app or all-supported-app scope consent** and **encrypted, unlocked storage**, and retain visible enabled/recording indicators. Pause, idle, and exclusions must stop it. Password-marked or inaccessible fields and recognized terminal/password-manager apps must remain excluded. Unsupported or uncertain control identity must fail closed. Never present these checks as a guarantee that ordinary fields cannot contain secrets.
+
+All-supported-app mode is an explicit, default-off choice covering current and future apps; it must preserve all field, process, pause, exclusion, and encryption checks. Do not add clipboard, screenshot, screen-content, hidden, or consent-bypassing input capture. Do not send recorded text through exports, summaries, emails, update requests, or telemetry. Plaintext stores must reject recorded text. Preserve the action that deletes only recorded text while retaining activity times, and test storage, opt-in, control-eligibility, and failure paths when changing this feature. See [docs/PRIVACY.md](docs/PRIVACY.md) and [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
 
 ## Setting up
 
@@ -24,7 +26,7 @@ Layers are cleanly separated. Keep it that way.
 
 | Layer | Responsibility |
 | --- | --- |
-| `capture/` | Sensing: active app and window title (`active-win-pos-rs`) |
+| `capture/` | Active app/title, OS elapsed idle time, and gated optional Windows text recording |
 | `storage/` | Persistence behind the `Store` trait (plaintext JSONL, AES-256-GCM) |
 | `core` | State and logic: polling, sessions, analytics, blocklist, purge |
 | `commands` | Tauri IPC bridge between UI and core |
@@ -42,7 +44,7 @@ Layers are cleanly separated. Keep it that way.
   cargo clippy --all-targets -- -D warnings
   cargo test
   ```
-- Keep privacy in mind: no network calls, no telemetry.
+- Network activity belongs only to explicit optional summary-email/update features. No telemetry or recorded-text uploads.
 
 ## Pull requests
 

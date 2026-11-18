@@ -1,8 +1,7 @@
 //! Thin wrapper over active-window detection.
 //!
-//! This is the ONLY thing daylog senses about your activity: the name of the
-//! frontmost application and its window title. There is no keyboard, mouse, or
-//! clipboard hook anywhere in this crate.
+//! This module senses only the frontmost application and window title.
+//! OS idle time and opt-in Windows text recording have separate modules.
 
 use serde::Serialize;
 

@@ -1,7 +1,7 @@
 //! daylog — privacy-respecting personal activity logger.
 //!
 //! Layer map (each isolated behind a clean boundary so it can evolve alone):
-//!   capture/  → senses the active window (app + title). No keyboard hooks.
+//!   capture/  → active window, OS idle time, and opt-in Windows text capture.
 //!   storage/  → plaintext JSONL or AES-GCM encrypted, behind one `Store` trait.
 //!   core      → the shared state + all session/analytics logic.
 //!   commands  → the Tauri IPC surface the UI calls.
@@ -11,8 +11,11 @@ mod capture;
 mod commands;
 mod config;
 mod core;
+mod insights;
 mod model;
+mod reports;
 mod storage;
+mod updates;
 
 use crate::core::Core;
 use std::sync::{Arc, Mutex};
@@ -39,6 +42,7 @@ fn show_main_window(app: &tauri::AppHandle) {
 pub fn run() {
     let shared: SharedCore = Arc::new(Mutex::new(Core::bootstrap()));
     let show_on_launch = { shared.lock().unwrap().config.show_window_on_launch };
+    let email = Arc::new(reports::EmailRuntime::default());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -48,6 +52,8 @@ pub fn run() {
             Some(vec![]),
         ))
         .manage(shared.clone())
+        .manage(email.clone())
+        .manage(updates::PendingUpdate::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::set_config,
@@ -55,15 +61,28 @@ pub fn run() {
             commands::pause,
             commands::resume,
             commands::clear_logs,
+            commands::clear_recorded_text,
             commands::query,
             commands::analytics,
+            commands::application_details,
             commands::unlock,
             commands::set_encryption,
             commands::export,
             commands::reveal_log,
+            commands::summary_preview,
+            commands::export_summary,
+            commands::email_status,
+            commands::set_email_password,
+            commands::send_summary_email,
+            updates::update_configured,
+            updates::check_updates,
+            updates::install_update,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            if updates::configured(&handle) {
+                handle.plugin(tauri_plugin_updater::Builder::new().build())?;
+            }
 
             // --- System tray: quick actions without opening the window ---
             let open_i = MenuItem::with_id(app, "open", "Open daylog", true, None::<&str>)?;
@@ -144,6 +163,9 @@ pub fn run() {
             }
 
             // --- Start the capture thread ---
+            reports::spawn(shared.clone(), email.clone());
+            updates::spawn(shared.clone(), handle.clone());
+            capture::typing::spawn(shared.clone());
             capture::spawn(shared.clone(), handle);
             Ok(())
         })

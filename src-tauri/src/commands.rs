@@ -4,7 +4,7 @@
 //! promises in the frontend.
 
 use crate::config::Config;
-use crate::model::{Analytics, Event, EventFilter, Status};
+use crate::model::{Analytics, ApplicationDetails, Event, EventFilter, Status};
 use crate::SharedCore;
 use chrono::{Local, TimeZone};
 use std::path::PathBuf;
@@ -31,10 +31,15 @@ pub fn get_status(core: State<'_, SharedCore>) -> R<Status> {
 /// start-on-login registration, and reopening the store when the path or
 /// encryption flag changed.
 #[tauri::command]
-pub fn set_config(app: AppHandle, core: State<'_, SharedCore>, config: Config) -> R<Status> {
+pub fn set_config(
+    app: AppHandle,
+    core: State<'_, SharedCore>,
+    config: Config,
+    password: Option<String>,
+) -> R<Status> {
     let mut c = lock(&core);
     let old = c.config.clone();
-
+    config.validate().map_err(|e| e.to_string())?;
     // Apply start-on-login via the autostart plugin.
     if config.start_on_login != old.start_on_login {
         let m = app.autolaunch();
@@ -46,25 +51,13 @@ pub fn set_config(app: AppHandle, core: State<'_, SharedCore>, config: Config) -
         res.map_err(|e| format!("start-on-login: {e}"))?;
     }
 
-    let path_changed = config.log_path != old.log_path;
-    c.config = config;
-    // Encryption is toggled ONLY through `set_encryption` (which verifies the
-    // password and opens the store before persisting the flag). Ignore any
-    // change the caller tried to make here so this path can never leave the
-    // config claiming "encrypted" while a plaintext store stays live.
-    c.config.encryption_enabled = old.encryption_enabled;
-    c.config.save().map_err(|e| e.to_string())?;
-
-    // Reopen the store when the destination path changed.
-    if path_changed {
-        c.flush_current();
-        if c.config.encryption_enabled {
-            // New encrypted path needs the password again — lock until `unlock`,
-            // rather than writing to the new file with a key we haven't re-derived.
-            c.store_lock();
+    if let Err(e) = c.apply_config(config, password.as_deref()) {
+        if old.start_on_login {
+            let _ = app.autolaunch().enable();
         } else {
-            c.open_store(None).map_err(|e| e.to_string())?;
+            let _ = app.autolaunch().disable();
         }
+        return Err(e.to_string());
     }
     Ok(c.status())
 }
@@ -92,6 +85,13 @@ pub fn clear_logs(core: State<'_, SharedCore>) -> R<Status> {
 }
 
 #[tauri::command]
+pub fn clear_recorded_text(core: State<'_, SharedCore>) -> R<Status> {
+    let mut c = lock(&core);
+    c.clear_recorded_text().map_err(|e| e.to_string())?;
+    Ok(c.status())
+}
+
+#[tauri::command]
 pub fn query(core: State<'_, SharedCore>, filter: EventFilter) -> R<Vec<Event>> {
     lock(&core).query(&filter).map_err(|e| e.to_string())
 }
@@ -99,6 +99,18 @@ pub fn query(core: State<'_, SharedCore>, filter: EventFilter) -> R<Vec<Event>> 
 #[tauri::command]
 pub fn analytics(core: State<'_, SharedCore>, filter: EventFilter) -> R<Analytics> {
     lock(&core).analytics(&filter).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn application_details(
+    core: State<'_, SharedCore>,
+    app: String,
+    filter: EventFilter,
+    text_only: Option<bool>,
+) -> R<ApplicationDetails> {
+    lock(&core)
+        .application_details(&app, &filter, text_only.unwrap_or(false))
+        .map_err(|error| error.to_string())
 }
 
 /// Unlock an encrypted store with the session password (wrong password errors).
@@ -117,32 +129,8 @@ pub fn set_encryption(
     password: Option<String>,
 ) -> R<Status> {
     let mut c = lock(&core);
-    c.flush_current();
-    let prev = c.config.encryption_enabled;
-
-    // Fail-safe: open (and for encryption, verify the password against) the new
-    // store BEFORE persisting the flag. If anything fails we revert the flag and
-    // drop the store, so we never keep writing plaintext while the config claims
-    // the log is encrypted. `open_store` reads `encryption_enabled` to pick the
-    // backend + path, so set it first, then roll back on error.
-    c.config.encryption_enabled = enabled;
-    let opened = if enabled {
-        match password {
-            Some(pw) if !pw.is_empty() => c.open_store(Some(&pw)),
-            Some(_) => Err(anyhow::anyhow!("password cannot be empty")),
-            None => Err(anyhow::anyhow!("password required to enable encryption")),
-        }
-    } else {
-        c.open_store(None)
-    };
-    if let Err(e) = opened {
-        c.config.encryption_enabled = prev;
-        c.store_lock(); // ensure no stale plaintext store survives a failed enable
-        return Err(e.to_string());
-    }
-
-    // Only now is it safe to persist the new encryption state.
-    c.config.save().map_err(|e| e.to_string())?;
+    c.set_encryption(enabled, password.as_deref())
+        .map_err(|e| e.to_string())?;
     Ok(c.status())
 }
 
@@ -152,13 +140,14 @@ pub fn set_encryption(
 pub fn export(
     core: State<'_, SharedCore>,
     format: String,
-    filter: EventFilter,
+    mut filter: EventFilter,
     dest: Option<String>,
 ) -> R<String> {
     let c = lock(&core);
+    filter.limit = None;
+    filter.offset = None;
     let events = c.query(&filter).map_err(|e| e.to_string())?;
     let base = c.active_path();
-    drop(c);
 
     let fmt = format.to_lowercase();
     let ext = if fmt == "md" || fmt == "markdown" {
@@ -169,13 +158,15 @@ pub fn export(
     let dest: PathBuf = dest
         .map(PathBuf::from)
         .unwrap_or_else(|| base.with_file_name(format!("daylog-export.{ext}")));
+    validate_export_path(&c.config.log_path, &dest)?;
+    drop(c);
 
     let body = if ext == "md" {
         render_markdown(&events)
     } else {
         render_csv(&events)
     };
-    std::fs::write(&dest, body).map_err(|e| e.to_string())?;
+    crate::storage::atomic_write(&dest, body.as_bytes()).map_err(|e| e.to_string())?;
     Ok(dest.display().to_string())
 }
 
@@ -188,11 +179,33 @@ fn local(ts: chrono::DateTime<chrono::Utc>) -> String {
 
 fn csv_field(s: &str) -> String {
     // RFC-4180-ish quoting.
-    if s.contains([',', '"', '\n']) {
+    if s.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
     }
+}
+
+fn csv_text(s: &str) -> String {
+    if s.trim_start().starts_with(['=', '+', '-', '@']) || s.starts_with(['\t', '\r']) {
+        csv_field(&format!("'{s}"))
+    } else {
+        csv_field(s)
+    }
+}
+
+fn validate_export_path(base: &std::path::Path, destination: &std::path::Path) -> R<()> {
+    for protected in [base.to_path_buf(), crate::storage::active_path(base, true)] {
+        let same = protected == destination
+            || (protected.exists()
+                && destination.exists()
+                && std::fs::canonicalize(&protected).ok()
+                    == std::fs::canonicalize(destination).ok());
+        if same {
+            return Err("Choose an export file other than the activity log.".into());
+        }
+    }
+    Ok(())
 }
 
 fn render_csv(events: &[Event]) -> String {
@@ -203,15 +216,19 @@ fn render_csv(events: &[Event]) -> String {
             csv_field(&local(e.start)),
             csv_field(&local(e.end)),
             e.seconds,
-            csv_field(&e.app),
-            csv_field(&e.title),
+            csv_text(&e.app),
+            csv_text(&e.title),
         ));
     }
     out
 }
 
 fn md_field(s: &str) -> String {
-    s.replace('|', "\\|").replace('\n', " ")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('|', "\\|")
+        .replace(['\n', '\r'], " ")
 }
 
 fn render_markdown(events: &[Event]) -> String {
@@ -243,4 +260,86 @@ pub fn reveal_log(app: AppHandle, core: State<'_, SharedCore>) -> R<()> {
     app.opener()
         .open_path(dir.display().to_string(), None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn summary_preview(core: State<'_, SharedCore>, weekly: bool) -> R<String> {
+    crate::reports::preview(&core, weekly).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn export_summary(core: State<'_, SharedCore>, weekly: bool, dest: String) -> R<String> {
+    let body = crate::reports::preview(&core, weekly).map_err(|e| e.to_string())?;
+    let path = PathBuf::from(dest);
+    validate_export_path(&lock(&core).config.log_path, &path)?;
+    crate::storage::atomic_write(&path, body.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+pub fn email_status(
+    core: State<'_, SharedCore>,
+    runtime: State<'_, std::sync::Arc<crate::reports::EmailRuntime>>,
+) -> crate::reports::EmailStatus {
+    runtime.status(&lock(&core).config.email)
+}
+
+#[tauri::command]
+pub fn set_email_password(
+    core: State<'_, SharedCore>,
+    runtime: State<'_, std::sync::Arc<crate::reports::EmailRuntime>>,
+    password: String,
+) {
+    runtime.set_password(password, &lock(&core).config.email);
+}
+
+#[tauri::command]
+pub async fn send_summary_email(
+    core: State<'_, SharedCore>,
+    runtime: State<'_, std::sync::Arc<crate::reports::EmailRuntime>>,
+) -> R<()> {
+    let core = core.inner().clone();
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::reports::send_summary(&core, &runtime, false)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn exports_quote_newlines_and_neutralize_spreadsheet_formulas() {
+        assert_eq!(
+            csv_text("hello, \"world\"\r\n"),
+            "\"hello, \"\"world\"\"\r\n\""
+        );
+        assert_eq!(csv_text("=1+1"), "'=1+1");
+        assert_eq!(csv_text("  @SUM(1)"), "'  @SUM(1)");
+        assert_eq!(md_field("<script>|x\r\ny"), "&lt;script&gt;\\|x  y");
+    }
+    #[test]
+    fn exports_cannot_overwrite_activity_files() {
+        let base = std::env::temp_dir().join("daylog-protected.log");
+        assert!(validate_export_path(&base, &base).is_err());
+        assert!(validate_export_path(&base, &base.with_extension("enc")).is_err());
+        assert!(validate_export_path(&base, &base.with_extension("csv")).is_ok());
+    }
+
+    #[test]
+    fn exports_omit_recorded_text() {
+        let now = chrono::Utc::now();
+        let mut event = Event::new(
+            now,
+            now + chrono::Duration::seconds(2),
+            "Editor".into(),
+            "Document".into(),
+        );
+        event.typed_text = Some("private captured content".into());
+        assert!(!render_csv(&[event.clone()]).contains("private captured content"));
+        assert!(!render_markdown(&[event]).contains("private captured content"));
+    }
 }

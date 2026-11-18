@@ -4,6 +4,8 @@
 //! It holds no logging logic of its own beyond timing — all session bookkeeping
 //! lives in `core` so it can be tested without a running desktop.
 
+pub mod idle;
+pub mod typing;
 pub mod window;
 
 use crate::SharedCore;
@@ -22,10 +24,11 @@ pub fn spawn(shared: SharedCore, app: AppHandle) {
 
         // Sample the frontmost window (app + title only).
         let focus = window::current_focus();
+        let idle = idle::duration();
 
         let status = {
             let mut c = shared.lock().unwrap();
-            c.tick(focus, Utc::now());
+            c.tick_with_idle(focus, Utc::now(), idle);
             c.status()
         };
         let _ = app.emit("daylog://status", status);

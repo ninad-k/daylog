@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "daylog",
-  "version": "0.1.0",
+  "version": "0.2.2",
   "identifier": "com.ninadk.daylog",
   "build": {
     "frontendDist": "../ui"
@@ -35,8 +35,9 @@
       "icons/icon.ico"
     ],
     "category": "Productivity",
+    "linux": { "deb": { "depends": ["libxss1"] } },
     "shortDescription": "Privacy-respecting personal activity logger.",
-    "longDescription": "daylog records which applications and windows you use and for how long — timestamped to a local log file — so you can review where your time goes. It never captures keystrokes or typed text. Optional AES-GCM encryption, sensitive-app exclusion, and CSV/Markdown export."
+    "longDescription": "daylog records application and window focus time locally, with daily and weekly analytics, categories, goals, saved filters, and CSV/Markdown export. Optional Windows text recording requires encrypted storage and explicit approval for selected or all supported apps. Includes idle detection, exclusions, and opt-in email summaries and signed update checks."
   },
   "plugins": {}
 }

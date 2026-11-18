@@ -29,6 +29,7 @@
         <span id="pill-state" class="pill">—</span>
         <span id="pill-enc" class="pill pill-muted">plaintext</span>
         <span id="pill-current" class="pill pill-current" title="currently focused">idle</span>
+        <span id="pill-text" class="pill pill-recording hidden" role="status">Recording text</span>
       </div>
       <button id="toggle-pause" class="pause-btn">Pause</button>
     </header>
@@ -40,12 +41,16 @@
     </nav>
 
     <main>
+      <div id="global-note" class="note hidden" role="status" aria-live="polite"></div>
+      <div id="text-capture-notice" class="warn-banner hidden" role="status" aria-live="polite"></div>
+      <div id="update-banner" class="warn-banner hidden"><span id="update-message"></span> <button id="install-update" class="primary">Install and restart</button></div>
       <!-- DASHBOARD -->
       <section id="tab-dashboard" class="tab-panel active">
         <div class="range-row">
           <label>Range</label>
           <select id="range-select">
             <option value="today">Today</option>
+            <option value="week">This week</option>
             <option value="7d" selected>Last 7 days</option>
             <option value="30d">Last 30 days</option>
             <option value="all">All time</option>
@@ -64,10 +69,12 @@
           </div>
           <div class="card stat">
             <div class="stat-label">Top app</div>
-            <div id="stat-top" class="stat-value">—</div>
+            <button id="stat-top" class="stat-value app-name-link stat-app" type="button" disabled>—</button>
           </div>
         </div>
 
+        <div class="cards summary-cards"><div class="card stat"><div class="stat-label">Today</div><div id="stat-today" class="stat-value">—</div></div><div class="card stat"><div class="stat-label">This week</div><div id="stat-week" class="stat-value">—</div></div><div class="card stat"><div class="stat-label">Summary</div><div class="inline-row"><select id="summary-period" aria-label="Summary period"><option value="daily">Daily</option><option value="weekly">Weekly</option></select><button id="preview-summary" class="ghost">Preview</button></div></div></div>
+        <div class="card"><h3>Goals and limits <span class="sub">Current day / week</span></h3><div id="goal-progress" class="goal-list"></div></div>
         <div class="card">
           <h3>Time per app</h3>
           <div id="app-bars" class="bars"><div class="empty">No data yet.</div></div>
@@ -77,15 +84,17 @@
           <h3>By day</h3>
           <div id="day-bars" class="daybars"><div class="empty">No data yet.</div></div>
         </div>
+        <div class="card"><h3>Categories</h3><div id="category-bars" class="bars"></div></div>
+        <div class="card"><h3>Weekly summaries <span class="sub">Weeks begin Monday</span></h3><div id="week-bars" class="bars"></div></div>
       </section>
 
       <!-- LOG -->
       <section id="tab-log" class="tab-panel">
         <div class="filters">
-          <input id="f-keyword" type="text" placeholder="Search app or title…" />
-          <input id="f-app" type="text" placeholder="App filter" />
-          <input id="f-from" type="date" />
-          <input id="f-to" type="date" />
+          <input id="f-keyword" type="search" aria-label="Search app, title, or recorded text" placeholder='Words, "phrases", -exclude…' />
+          <input id="f-app" type="text" aria-label="App filter" placeholder="App filter" list="known-apps" /><select id="f-category" aria-label="Category filter"><option value="">All categories</option></select>
+          <input id="f-from" type="date" aria-label="From date" />
+          <input id="f-to" type="date" aria-label="To date" />
           <select id="f-limit">
             <option value="200">200 rows</option>
             <option value="500">500 rows</option>
@@ -98,7 +107,9 @@
           <button id="export-md" class="ghost">Export MD</button>
           <button id="clear-logs" class="danger">Clear…</button>
         </div>
+        <div class="saved-row"><select id="saved-filter" aria-label="Saved filter"><option value="">Saved filters…</option></select><button id="load-saved" class="ghost">Load</button><button id="delete-saved" class="ghost">Delete</button><input id="filter-name" aria-label="Filter name" placeholder="Name this filter" maxlength="80" /><button id="save-filter" class="ghost">Save filter</button><button id="reset-filter" class="ghost">Reset</button></div>
         <div id="export-note" class="note hidden"></div>
+        <p class="muted">Recorded text is collapsed beneath its session. CSV and Markdown exports omit recorded text. Summaries and emails omit recorded text and window titles.</p>
         <div class="table-wrap">
           <table id="log-table">
             <thead>
@@ -108,6 +119,30 @@
           </table>
           <div id="log-empty" class="empty">No entries match.</div>
         </div>
+        <div class="pager"><button id="prev-page" class="ghost">Previous</button><span id="page-info" aria-live="polite"></span><button id="next-page" class="ghost">Next</button></div>
+      </section>
+
+      <!-- APPLICATION DETAILS -->
+      <section id="tab-app-details" class="tab-panel" aria-labelledby="app-details-title">
+        <div class="app-detail-top"><button id="app-detail-back" class="ghost" type="button">← Back to dashboard</button><button id="app-detail-refresh" class="ghost" type="button">Refresh</button></div>
+        <div class="app-detail-heading"><div id="app-detail-icon" class="app-avatar" aria-hidden="true"></div><div><p class="eyebrow">Application details</p><h1 id="app-details-title" tabindex="-1"></h1><p id="app-detail-meta" class="muted"></p></div></div>
+        <div class="filters app-detail-filters">
+          <label>From <input id="app-detail-from" type="date" aria-label="Application details from date" /></label>
+          <label>To <input id="app-detail-to" type="date" aria-label="Application details to date" /></label>
+          <input id="app-detail-keyword" type="search" aria-label="Search this application's titles and recorded text" placeholder='Search titles or recorded text…' />
+          <button id="app-detail-apply" class="primary" type="button">Apply</button><button id="app-detail-reset" class="ghost" type="button">All history</button>
+        </div>
+        <div class="cards app-detail-stats">
+          <div class="card stat"><div class="stat-label">Tracked time</div><div id="app-detail-time" class="stat-value">—</div></div>
+          <div class="card stat"><div class="stat-label">Activity sessions</div><div id="app-detail-sessions" class="stat-value">—</div></div>
+          <div class="card stat"><div class="stat-label">Recorded characters</div><div id="app-detail-characters" class="stat-value">—</div></div>
+        </div>
+        <div class="app-detail-tabs" role="group" aria-label="Application details views"><button id="app-detail-text-tab" class="detail-tab active" type="button" aria-pressed="true">Recorded text</button><button id="app-detail-log-tab" class="detail-tab" type="button" aria-pressed="false">Activity log</button></div>
+        <p id="app-detail-loading" class="muted hidden" role="status" aria-live="polite">Loading application history…</p>
+        <p id="app-detail-error" class="err hidden" role="alert"></p>
+        <div id="app-detail-text-view"><p id="app-detail-text-note" class="muted">Recorded text is grouped by session and window, newest first.</p><div id="app-detail-text-list"></div><div id="app-detail-text-empty" class="card empty hidden">No recorded text in this range. Text is available only for sessions recorded after you enabled text recording for this app. Protected or unsupported fields and pasted text are skipped.</div></div>
+        <div id="app-detail-log-view" class="hidden"><p class="muted">App focus history, including sessions with no recorded text.</p><div class="table-wrap app-detail-table"><table><thead><tr><th>Start</th><th>End</th><th>Duration</th><th>Window title</th><th>Text</th></tr></thead><tbody id="app-detail-log-body"></tbody></table><div id="app-detail-log-empty" class="empty hidden">No activity logs match these filters.</div></div></div>
+        <div class="pager"><button id="app-detail-prev" class="ghost" type="button" disabled>Previous</button><span id="app-detail-page" aria-live="polite"></span><button id="app-detail-next" class="ghost" type="button" disabled>Next</button></div>
       </section>
 
       <!-- SETTINGS -->
@@ -115,9 +150,8 @@
         <div class="warn-banner">
           ⚠️ The log records <b>window titles</b> (e.g. document or page names), which can
           be sensitive. With encryption <b>off</b>, the log file is plain text and readable by
-          anything that can read it. daylog never records keystrokes or typed text.
-          Global activity tools can occasionally be flagged by antivirus — this one uses
-          <b>no keyboard hook</b>, but an unsigned build may still prompt Gatekeeper/SmartScreen.
+          anything that can read it. Optional text recording is off by default and requires
+          encryption and your choice of selected apps or all supported apps. Review the controls below before enabling it.
         </div>
 
         <div class="card">
@@ -137,14 +171,30 @@
 
         <div class="card">
           <h3>Encryption <span class="sub">AES-256-GCM · Argon2id key · password never stored</span></h3>
+          <p class="muted">Switching encryption migrates existing history and removes the old source file after saving. Exports and external backups remain separate files.</p>
           <label class="switch-row">
             <input id="s-enc" type="checkbox" />
             <span>Encrypt the log at rest</span>
           </label>
           <label class="field" id="enc-pw-field">
-            <span>Password (required to enable; needed each session to read)</span>
+            <span>Password (required when enabling encryption or moving an encrypted log; unlock again each launch)</span>
             <input id="s-enc-pw" type="password" autocomplete="off" placeholder="••••••••" />
           </label>
+        </div>
+
+        <div class="card text-capture-card">
+          <h3>Text recording <span class="sub">Optional · Windows · encrypted storage required</span></h3>
+          <p class="muted">Record actual text entered in supported editable fields. Password-marked fields, recognized terminal/password-manager apps and contexts, excluded apps, and inaccessible fields are skipped in every mode. An ordinary field can still contain sensitive information.</p>
+          <label class="switch-row"><input id="s-text-capture" type="checkbox" /><span>Enable text recording</span></label>
+          <p id="text-capture-support" class="muted"></p>
+          <label class="switch-row"><input id="s-text-all" type="checkbox" aria-describedby="text-all-description" /><span>All supported apps</span></label>
+          <p id="text-all-description" class="muted">Includes supported apps you open in the future. Leave this off to record only the apps listed below. Protected-field and app exclusions apply in both modes.</p>
+          <label id="text-selected-apps-field" class="field"><span>Selected apps — one exact app name per line</span><textarea id="s-text-apps" rows="4" placeholder="Notepad&#10;Microsoft Word" autocomplete="off" spellcheck="false"></textarea></label>
+          <p class="muted">For selected apps, use the name shown in the header. Matching ignores capitalization; partial names and wildcards do not select other apps. Your selected list is kept when you choose all supported apps. Save settings to apply. Pause logging stops text recording too.</p>
+          <p class="muted">Records supported typed characters in sequence. Backspace changes the recorded sequence; cursor movements are not reconstructed, so it can differ from the final document. Pasted content is not captured.</p>
+          <p id="text-encryption-warning" class="note hidden">Enable encryption, or turn off text recording, before saving.</p>
+          <p class="muted">Captured text stays in the encrypted local log and can be searched and expanded in the Log view. Text is omitted from exports, summaries, and emails. Turning recording off keeps existing text. Delete recorded text before turning encryption off; activity times remain.</p>
+          <button id="clear-recorded-text" class="danger">Delete recorded text…</button>
         </div>
 
         <div class="card">
@@ -169,19 +219,26 @@
             <input id="s-show" type="checkbox" />
             <span>Show window on launch (otherwise tray-only)</span>
           </label>
+          <label class="field"><span>Idle threshold (seconds, blank = disabled)</span><input id="s-idle" type="number" min="15" max="86400" placeholder="300" /></label><p id="idle-support" class="muted"></p>
           <label class="field">
             <span>Sampling interval (ms)</span>
-            <input id="s-poll" type="number" min="250" step="250" />
+            <input id="s-poll" type="number" min="250" max="60000" />
           </label>
         </div>
 
-        <div class="settings-actions">
-          <button id="save-settings" class="primary">Save settings</button>
-          <span id="save-note" class="note"></span>
+        <div class="card"><h3>App categories</h3><p class="muted">Assign an exact app name to a category. Unassigned apps appear as Uncategorized.</p><div id="category-list" class="editor-list"></div><div class="inline-row"><input id="category-app" placeholder="App name" aria-label="App name" list="known-apps" /><input id="category-name" placeholder="Category" aria-label="Category name" list="known-categories" /><button id="add-category" class="ghost">Add category</button></div></div>
+        <div class="card"><h3>Time goals and limits</h3><div id="goal-list" class="editor-list"></div><div class="goal-form"><input id="goal-name" placeholder="Name" aria-label="Goal name" /><select id="goal-type" aria-label="Target type"><option value="app">App</option><option value="category">Category</option></select><input id="goal-target" placeholder="App or category name" aria-label="Goal target" list="known-targets" /><select id="goal-period" aria-label="Goal period"><option value="daily">Daily</option><option value="weekly">Weekly</option></select><select id="goal-kind" aria-label="Goal kind"><option value="goal">Goal</option><option value="limit">Limit</option></select><input id="goal-minutes" type="number" min="1" placeholder="Minutes" aria-label="Goal minutes" /><button id="add-goal" class="ghost">Add</button></div></div>
+        <div class="card"><h3>Summary emails <span class="sub">Optional · TLS only</span></h3><label class="switch-row"><input id="s-email" type="checkbox" /><span>Email app and category totals (window titles omitted)</span></label><div class="settings-grid"><label class="field"><span>SMTP hostname</span><input id="email-host" placeholder="smtp.example.com" /></label><label class="field"><span>Port</span><input id="email-port" type="number" min="1" max="65535" value="587" /></label><label class="field"><span>Username (blank for no authentication)</span><input id="email-user" autocomplete="off" /></label><label class="field"><span>SMTP password (this app session only)</span><input id="email-password" type="password" autocomplete="off" /></label><label class="field"><span>Sender</span><input id="email-from" type="email" /></label><label class="field"><span>Recipient</span><input id="email-to" type="email" /></label><label class="field"><span>Schedule</span><select id="email-period"><option value="daily">Daily</option><option value="weekly">Weekly</option></select></label><label class="field"><span>Send after this local hour (0–23)</span><input id="email-hour" type="number" min="0" max="23" value="9" /></label></div><label class="switch-row"><input id="email-tls" type="checkbox" /><span>Implicit TLS (usually port 465; otherwise required STARTTLS)</span></label><p class="muted">Save settings to enable. While daylog is running and unlocked, sends the previous complete day or week once after the chosen hour. Enter the SMTP password again after restarting. Catch-up sends only the most recent period.</p><button id="send-email" class="ghost">Send current summary now</button><p id="email-status" class="note" aria-live="polite"></p></div>
+        <div class="card"><h3>Updates</h3><label class="switch-row"><input id="s-updates" type="checkbox" /><span>Check for signed updates at startup and every six hours</span></label><p class="muted">Update checks contact the release server only when enabled or requested. Installation requires the Install and restart button.</p><button id="check-updates" class="ghost">Check for updates</button><p id="update-status" class="note" aria-live="polite"></p></div>
+        <div class="settings-actions" role="region" aria-label="Save settings">
+          <button id="save-settings" class="primary" type="button">Save settings</button>
+          <span id="save-note" class="note" role="status" aria-live="polite"></span>
         </div>
       </section>
     </main>
 
+    <datalist id="known-apps"></datalist><datalist id="known-categories"></datalist><datalist id="known-targets"></datalist>
+    <dialog id="summary-dialog"><h2>Activity summary</h2><pre id="summary-text"></pre><div class="inline-row"><button id="save-summary" class="primary">Save summary</button><button id="close-summary" class="ghost">Close</button></div></dialog>
     <script src="app.js"></script>
   </body>
 </html>
